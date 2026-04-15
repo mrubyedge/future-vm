@@ -85,9 +85,9 @@ impl VM {
     /// Returns a BoxFuture to support recursive calls via SSEND.
     pub fn execute<'a>(&'a self, iseq: &'a Iseq, args: Vec<Value>) -> BoxFuture<'a, Value> {
         async move {
-            let mut regs = vec![Value::Nil; iseq.max_regs];
+            let mut regs = vec![Value::Nil; iseq.max_regs + 1]; // 1-based indexing
             for (i, arg) in args.into_iter().enumerate() {
-                regs[i] = arg;
+                regs[i + 1] = arg; // arguments start at R[1]
             }
 
             let mut pc: usize = 0;
@@ -196,16 +196,16 @@ mod tests {
 
     #[test]
     fn test_loadi_and_return() {
-        // LOADI R[0], 42
-        // RETURN R[0]
+        // LOADI R[1], 42
+        // RETURN R[1]
         let iseq = Iseq {
             name: "main".into(),
             argc: 0,
             max_regs: 1,
             symbols: vec![],
             instructions: vec![
-                inst(OpCode::LoadI, 0, 42, 0),
-                inst(OpCode::Return, 0, 0, 0),
+                inst(OpCode::LoadI, 1, 42, 0),
+                inst(OpCode::Return, 1, 0, 0),
             ],
         };
 
@@ -217,28 +217,28 @@ mod tests {
 
     #[test]
     fn test_arithmetic() {
-        // LOADI R[0], 10
-        // LOADI R[1], 3
-        // ADD   R[0]         -> R[0] = 10 + 3 = 13
-        // ADDI  R[0], 7      -> R[0] = 13 + 7 = 20
-        // LOADI R[1], 5
-        // SUB   R[0]         -> R[0] = 20 - 5 = 15
-        // SUBI  R[0], 3      -> R[0] = 15 - 3 = 12
-        // RETURN R[0]
+        // LOADI R[1], 10
+        // LOADI R[2], 3
+        // ADD   R[1]         -> R[1] = 10 + 3 = 13
+        // ADDI  R[1], 7      -> R[1] = 13 + 7 = 20
+        // LOADI R[2], 5
+        // SUB   R[1]         -> R[1] = 20 - 5 = 15
+        // SUBI  R[1], 3      -> R[1] = 15 - 3 = 12
+        // RETURN R[1]
         let iseq = Iseq {
             name: "main".into(),
             argc: 0,
             max_regs: 2,
             symbols: vec![],
             instructions: vec![
-                inst(OpCode::LoadI, 0, 10, 0),
-                inst(OpCode::LoadI, 1, 3, 0),
-                inst(OpCode::Add, 0, 0, 0),
-                inst(OpCode::AddI, 0, 7, 0),
-                inst(OpCode::LoadI, 1, 5, 0),
-                inst(OpCode::Sub, 0, 0, 0),
-                inst(OpCode::SubI, 0, 3, 0),
-                inst(OpCode::Return, 0, 0, 0),
+                inst(OpCode::LoadI, 1, 10, 0),
+                inst(OpCode::LoadI, 2, 3, 0),
+                inst(OpCode::Add, 1, 0, 0),
+                inst(OpCode::AddI, 1, 7, 0),
+                inst(OpCode::LoadI, 2, 5, 0),
+                inst(OpCode::Sub, 1, 0, 0),
+                inst(OpCode::SubI, 1, 3, 0),
+                inst(OpCode::Return, 1, 0, 0),
             ],
         };
 
@@ -252,22 +252,22 @@ mod tests {
     fn test_loop_sum() {
         // sum(n): compute 1 + 2 + ... + n using a loop
         //
-        // R[0] = n (argument)
-        // R[1] = accumulator
-        // R[2] = counter (counts down from n to 1)
-        // R[3], R[4] = temporaries for LE comparison
+        // R[1] = n (argument)
+        // R[2] = accumulator
+        // R[3] = counter (counts down from n to 1)
+        // R[4], R[5] = temporaries for LE comparison
         //
-        // 0: LOADI R[1], 0        result = 0
-        // 1: MOVE  R[2], R[0]     counter = n
+        // 0: LOADI R[2], 0        result = 0
+        // 1: MOVE  R[3], R[1]     counter = n
         // --- loop (pc=2) ---
-        // 2: MOVE  R[3], R[2]     R[3] = counter
-        // 3: LOADI R[4], 0        R[4] = 0
-        // 4: LE    R[3]           R[3] = (counter <= 0)
-        // 5: JMPNOT R[3], 7       if counter > 0, goto 7
-        // 6: RETURN R[1]          return result
+        // 2: MOVE  R[4], R[3]     R[4] = counter
+        // 3: LOADI R[5], 0        R[5] = 0
+        // 4: LE    R[4]           R[4] = (counter <= 0)
+        // 5: JMPNOT R[4], 7       if counter > 0, goto 7
+        // 6: RETURN R[2]          return result
         // --- body ---
-        // 7: ADD   R[1]           result += counter (R[1] + R[2])
-        // 8: SUBI  R[2], 1        counter -= 1
+        // 7: ADD   R[2]           result += counter (R[2] + R[3])
+        // 8: SUBI  R[3], 1        counter -= 1
         // 9: JMP   2              goto loop start
         let iseq = Iseq {
             name: "sum".into(),
@@ -275,15 +275,15 @@ mod tests {
             max_regs: 5,
             symbols: vec![],
             instructions: vec![
-                inst(OpCode::LoadI, 1, 0, 0),     // 0
-                inst(OpCode::Move, 2, 0, 0),      // 1
-                inst(OpCode::Move, 3, 2, 0),      // 2
-                inst(OpCode::LoadI, 4, 0, 0),     // 3
-                inst(OpCode::Le, 3, 0, 0),        // 4
-                inst(OpCode::JmpNot, 3, 7, 0),    // 5
-                inst(OpCode::Return, 1, 0, 0),    // 6
-                inst(OpCode::Add, 1, 0, 0),       // 7
-                inst(OpCode::SubI, 2, 1, 0),      // 8
+                inst(OpCode::LoadI, 2, 0, 0),     // 0
+                inst(OpCode::Move, 3, 1, 0),      // 1
+                inst(OpCode::Move, 4, 3, 0),      // 2
+                inst(OpCode::LoadI, 5, 0, 0),     // 3
+                inst(OpCode::Le, 4, 0, 0),        // 4
+                inst(OpCode::JmpNot, 4, 7, 0),    // 5
+                inst(OpCode::Return, 2, 0, 0),    // 6
+                inst(OpCode::Add, 2, 0, 0),       // 7
+                inst(OpCode::SubI, 3, 1, 0),      // 8
                 inst(OpCode::Jmp, 2, 0, 0),       // 9
             ],
         };
@@ -303,27 +303,27 @@ mod tests {
             max_regs: 2,
             symbols: vec![],
             instructions: vec![
-                inst(OpCode::Add, 0, 0, 0),    // R[0] = R[0] + R[1]
-                inst(OpCode::Return, 0, 0, 0),
+                inst(OpCode::Add, 1, 0, 0),    // R[1] = R[1] + R[2]
+                inst(OpCode::Return, 1, 0, 0),
             ],
         };
 
         // main(): calls add(21, 21)
         //
-        // 0: LOADI R[0], 21
-        // 1: LOADI R[1], 21
-        // 2: SSEND a=0, b=0, c=1   call symbols[0]="add" with R[0],R[1]
-        // 3: RETURN R[0]
+        // 0: LOADI R[1], 21
+        // 1: LOADI R[2], 21
+        // 2: SSEND a=1, b=0, c=1   call symbols[0]="add" with R[1],R[2]
+        // 3: RETURN R[1]
         let main_iseq = Iseq {
             name: "main".into(),
             argc: 0,
             max_regs: 2,
             symbols: vec!["add".into()],
             instructions: vec![
-                inst(OpCode::LoadI, 0, 21, 0),
                 inst(OpCode::LoadI, 1, 21, 0),
-                inst(OpCode::SSend, 0, 0, 1),
-                inst(OpCode::Return, 0, 0, 0),
+                inst(OpCode::LoadI, 2, 21, 0),
+                inst(OpCode::SSend, 1, 0, 1),
+                inst(OpCode::Return, 1, 0, 0),
             ],
         };
 
@@ -337,42 +337,42 @@ mod tests {
     fn test_recursive_fib() {
         // fib(n): compute Fibonacci number recursively
         //
-        // R[0] = n (argument, not modified)
-        // R[1] = temporary / result of fib(n-1)
-        // R[2] = temporary / result of fib(n-2)
+        // R[1] = n (argument, not modified)
+        // R[2] = temporary / result of fib(n-1)
+        // R[3] = temporary / result of fib(n-2)
         //
-        //  0: MOVE  R[1], R[0]       R[1] = n
-        //  1: LOADI R[2], 1          R[2] = 1
-        //  2: LE    R[1]             R[1] = (n <= 1)
-        //  3: JMPNOT R[1], 5         if n > 1, goto 5
-        //  4: RETURN R[0]            base case: return n
-        //  5: MOVE  R[1], R[0]       R[1] = n
-        //  6: SUBI  R[1], 1          R[1] = n - 1
-        //  7: SSEND a=1, b=0, c=0   R[1] = fib(n-1)
-        //  8: MOVE  R[2], R[0]       R[2] = n
-        //  9: SUBI  R[2], 2          R[2] = n - 2
-        // 10: SSEND a=2, b=0, c=0   R[2] = fib(n-2)
-        // 11: ADD   R[1]             R[1] = fib(n-1) + fib(n-2)
-        // 12: RETURN R[1]
+        //  0: MOVE  R[2], R[1]       R[2] = n
+        //  1: LOADI R[3], 1          R[3] = 1
+        //  2: LE    R[2]             R[2] = (n <= 1)
+        //  3: JMPNOT R[2], 5         if n > 1, goto 5
+        //  4: RETURN R[1]            base case: return n
+        //  5: MOVE  R[2], R[1]       R[2] = n
+        //  6: SUBI  R[2], 1          R[2] = n - 1
+        //  7: SSEND a=2, b=0, c=0   R[2] = fib(n-1)
+        //  8: MOVE  R[3], R[1]       R[3] = n
+        //  9: SUBI  R[3], 2          R[3] = n - 2
+        // 10: SSEND a=3, b=0, c=0   R[3] = fib(n-2)
+        // 11: ADD   R[2]             R[2] = fib(n-1) + fib(n-2)
+        // 12: RETURN R[2]
         let fib_iseq = Iseq {
             name: "fib".into(),
             argc: 1,
             max_regs: 3,
             symbols: vec!["fib".into()],
             instructions: vec![
-                inst(OpCode::Move, 1, 0, 0),      //  0
-                inst(OpCode::LoadI, 2, 1, 0),     //  1
-                inst(OpCode::Le, 1, 0, 0),        //  2
-                inst(OpCode::JmpNot, 1, 5, 0),    //  3
-                inst(OpCode::Return, 0, 0, 0),    //  4
-                inst(OpCode::Move, 1, 0, 0),      //  5
-                inst(OpCode::SubI, 1, 1, 0),      //  6
-                inst(OpCode::SSend, 1, 0, 0),     //  7
-                inst(OpCode::Move, 2, 0, 0),      //  8
-                inst(OpCode::SubI, 2, 2, 0),      //  9
-                inst(OpCode::SSend, 2, 0, 0),     // 10
-                inst(OpCode::Add, 1, 0, 0),       // 11
-                inst(OpCode::Return, 1, 0, 0),    // 12
+                inst(OpCode::Move, 2, 1, 0),      //  0
+                inst(OpCode::LoadI, 3, 1, 0),     //  1
+                inst(OpCode::Le, 2, 0, 0),        //  2
+                inst(OpCode::JmpNot, 2, 5, 0),    //  3
+                inst(OpCode::Return, 1, 0, 0),    //  4
+                inst(OpCode::Move, 2, 1, 0),      //  5
+                inst(OpCode::SubI, 2, 1, 0),      //  6
+                inst(OpCode::SSend, 2, 0, 0),     //  7
+                inst(OpCode::Move, 3, 1, 0),      //  8
+                inst(OpCode::SubI, 3, 2, 0),      //  9
+                inst(OpCode::SSend, 3, 0, 0),     // 10
+                inst(OpCode::Add, 2, 0, 0),       // 11
+                inst(OpCode::Return, 2, 0, 0),    // 12
             ],
         };
 
