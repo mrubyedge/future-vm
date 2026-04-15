@@ -217,6 +217,17 @@ impl Executor {
         Self
     }
 
+    /// Poll a future exactly once.
+    /// Returns Some(output) if the future completed, None if still pending.
+    pub fn step<F: Future>(&self, future: Pin<&mut F>) -> Option<F::Output> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match future.poll(&mut cx) {
+            Poll::Ready(output) => Some(output),
+            Poll::Pending => None,
+        }
+    }
+
     /// Run a future to completion and return the result.
     pub fn run<F: Future>(&self, future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
@@ -442,5 +453,34 @@ mod tests {
         assert_eq!(r0, Value::Integer(0));
         let r1 = executor.run(vm.execute(&fib_iseq, vec![Value::Integer(1)]));
         assert_eq!(r1, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_step() {
+        // LOADI R[1], 10
+        // ADDI  R[1], 5
+        // RETURN R[1]
+        let iseq = Iseq {
+            name: "main".into(),
+            argc: 0,
+            max_regs: 1,
+            symbols: vec![],
+            instructions: vec![
+                inst(OpCode::LoadI, 1, 10, 0),
+                inst(OpCode::AddI, 1, 5, 0),
+                inst(OpCode::Return, 1, 0, 0),
+            ],
+        };
+
+        let vm = VM::new(vec![iseq.clone()]);
+        let executor = Executor::new();
+        let mut future = std::pin::pin!(vm.execute(&iseq, vec![]));
+
+        // LOADI -> Pending
+        assert_eq!(executor.step(future.as_mut()), None);
+        // ADDI -> Pending
+        assert_eq!(executor.step(future.as_mut()), None);
+        // RETURN -> Ready
+        assert_eq!(executor.step(future.as_mut()), Some(Value::Integer(15)));
     }
 }
