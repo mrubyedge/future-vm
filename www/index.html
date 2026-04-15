@@ -10,7 +10,7 @@
         button:disabled { cursor: default; opacity: 0.4; }
         .controls { margin-bottom: 8px; }
         #log { background: #f4f4f4; border: 1px solid #ddd; padding: 12px; margin-top: 12px;
-               max-height: 480px; overflow-y: auto; white-space: pre; font-size: 13px; }
+               max-height: 240px; overflow-y: auto; white-space: pre; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -19,9 +19,12 @@
     <div class="controls">
         <button id="fib10-btn" disabled>fib(10)</button>
         <button id="fib25-btn" disabled>fib(25)</button>
+        | n=<input type="number" id="fib-n" value="15" min="0" max="40" style="width:50px;font-family:monospace;padding:4px;">
+        <button id="fibn-btn" disabled>fib(n)</button>
     </div>
     <div class="controls">
         <button id="step-btn" disabled>Step</button>
+        <button id="auto-btn" disabled>Auto</button>
         <button id="run-btn" disabled>Run All</button>
     </div>
     <div id="log">Loading wasm...</div>
@@ -31,20 +34,32 @@
         let stepCount = 0;
         let done = false;
         let currentN = 0;
+        let autoTimer = null;
 
         const logEl = document.getElementById('log');
         const stepBtn = document.getElementById('step-btn');
+        const autoBtn = document.getElementById('auto-btn');
         const runBtn = document.getElementById('run-btn');
         const fib10Btn = document.getElementById('fib10-btn');
         const fib25Btn = document.getElementById('fib25-btn');
 
+        function stopAuto() {
+            if (autoTimer !== null) {
+                clearInterval(autoTimer);
+                autoTimer = null;
+                autoBtn.textContent = 'Auto';
+            }
+        }
+
         function initFib(n) {
+            stopAuto();
             wasm.setup(n);
             currentN = n;
             stepCount = 0;
             done = false;
             logEl.textContent = 'VM initialized with fib(' + n + '). Ready.\n';
             stepBtn.disabled = false;
+            autoBtn.disabled = false;
             runBtn.disabled = false;
         }
 
@@ -60,19 +75,36 @@
                 logEl.textContent += '\nfib(' + currentN + ') = ' + result + '  (' + stepCount + ' steps)\n';
                 done = true;
                 stepBtn.disabled = true;
+                autoBtn.disabled = true;
                 runBtn.disabled = true;
+                stopAuto();
             }
             logEl.scrollTop = logEl.scrollHeight;
             return done;
         }
 
+        function toggleAuto() {
+            if (autoTimer !== null) {
+                stopAuto();
+            } else {
+                autoBtn.textContent = 'Stop';
+                autoTimer = setInterval(() => { stepOnce(); }, 4);
+            }
+        }
+
         function runAll() {
+            stopAuto();
             while (!stepOnce()) {}
         }
 
+        const fibNInput = document.getElementById('fib-n');
+        const fibNBtn = document.getElementById('fibn-btn');
+
         fib10Btn.onclick = () => initFib(10);
         fib25Btn.onclick = () => initFib(25);
+        fibNBtn.onclick = () => initFib(parseInt(fibNInput.value) || 0);
         stepBtn.onclick = stepOnce;
+        autoBtn.onclick = toggleAuto;
         runBtn.onclick = runAll;
 
         WebAssembly.instantiateStreaming(fetch('future_vm.wasm'))
@@ -80,6 +112,7 @@
                 wasm = result.instance.exports;
                 fib10Btn.disabled = false;
                 fib25Btn.disabled = false;
+                fibNBtn.disabled = false;
                 initFib(10);
             })
             .catch(err => {
