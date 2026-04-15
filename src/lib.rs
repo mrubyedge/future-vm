@@ -250,6 +250,97 @@ impl Default for Executor {
     }
 }
 
+// --- wasm exports ---
+// setup(): initialize VM with fib(10), returns 0
+// entrypoint(): poll once, returns 0 if pending, (result + 1) if done
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use super::*;
+    use std::cell::UnsafeCell;
+
+    // SAFETY: wasm32 is single-threaded, no data races possible
+    struct WasmCell<T>(UnsafeCell<T>);
+    unsafe impl<T> Sync for WasmCell<T> {}
+    impl<T> WasmCell<T> {
+        const fn new(val: T) -> Self {
+            Self(UnsafeCell::new(val))
+        }
+        fn get(&self) -> *mut T {
+            self.0.get()
+        }
+    }
+
+    struct VmData {
+        vm: VM,
+        iseq: Iseq,
+    }
+
+    static DATA: WasmCell<Option<Box<VmData>>> = WasmCell::new(None);
+    static FUTURE: WasmCell<Option<Pin<Box<VmFuture<'static>>>>> = WasmCell::new(None);
+
+    fn build_fib_iseq() -> Iseq {
+        Iseq {
+            name: "fib".into(),
+            argc: 1,
+            max_regs: 3,
+            symbols: vec!["fib".into()],
+            instructions: vec![
+                Instruction::new(OpCode::Move, 2, 1, 0),
+                Instruction::new(OpCode::LoadI, 3, 1, 0),
+                Instruction::new(OpCode::Le, 2, 0, 0),
+                Instruction::new(OpCode::JmpNot, 2, 5, 0),
+                Instruction::new(OpCode::Return, 1, 0, 0),
+                Instruction::new(OpCode::Move, 2, 1, 0),
+                Instruction::new(OpCode::SubI, 2, 1, 0),
+                Instruction::new(OpCode::SSend, 2, 0, 0),
+                Instruction::new(OpCode::Move, 3, 1, 0),
+                Instruction::new(OpCode::SubI, 3, 2, 0),
+                Instruction::new(OpCode::SSend, 3, 0, 0),
+                Instruction::new(OpCode::Add, 2, 0, 0),
+                Instruction::new(OpCode::Return, 2, 0, 0),
+            ],
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn setup(n: i32) -> i32 {
+        unsafe {
+            // Drop old future before data to avoid dangling refs
+            *FUTURE.get() = None;
+            *DATA.get() = None;
+
+            let iseq = build_fib_iseq();
+            let vm = VM::new(vec![iseq.clone()]);
+            *DATA.get() = Some(Box::new(VmData { vm, iseq }));
+
+            // SAFETY: VmData is heap-allocated in a static global and
+            // will not be moved or dropped while the future is alive.
+            let data = (*DATA.get()).as_ref().unwrap().as_ref();
+            let vm_ref: &'static VM = std::mem::transmute(&data.vm);
+            let iseq_ref: &'static Iseq = std::mem::transmute(&data.iseq);
+
+            let future = vm_ref.execute(iseq_ref, vec![Value::Integer(n as i64)]);
+            *FUTURE.get() = Some(Box::pin(future));
+        }
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn entrypoint() -> i32 {
+        unsafe {
+            let future = (*FUTURE.get())
+                .as_mut()
+                .expect("call setup() first");
+            let executor = Executor::new();
+            match executor.step(future.as_mut()) {
+                None => 0,
+                Some(Value::Integer(n)) => n as i32 + 1,
+                Some(_) => 1,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
