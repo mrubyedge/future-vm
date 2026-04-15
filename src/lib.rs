@@ -1,8 +1,6 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
-
-use futures::future::BoxFuture;
-use futures::FutureExt;
 
 /// Opcodes for the VM
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,78 +79,132 @@ impl VM {
         Self { iseqs }
     }
 
-    /// Execute an instruction sequence asynchronously.
-    /// Returns a BoxFuture to support recursive calls via SSEND.
-    pub fn execute<'a>(&'a self, iseq: &'a Iseq, args: Vec<Value>) -> BoxFuture<'a, Value> {
-        async move {
-            let mut regs = vec![Value::Nil; iseq.max_regs + 1]; // 1-based indexing
-            for (i, arg) in args.into_iter().enumerate() {
-                regs[i + 1] = arg; // arguments start at R[1]
-            }
+    /// Create a VmFuture that executes the instruction sequence.
+    /// Each poll executes one instruction and returns Pending.
+    /// Returns Ready only when a Return instruction is reached.
+    pub fn execute<'a>(&'a self, iseq: &'a Iseq, args: Vec<Value>) -> VmFuture<'a> {
+        VmFuture::new(self, iseq, args)
+    }
+}
 
-            let mut pc: usize = 0;
-            loop {
-                let inst = iseq.instructions[pc];
-                let a = inst.a as usize;
+/// Future that executes VM instructions one per poll.
+/// Returns Pending after each instruction, Ready on Return.
+pub struct VmFuture<'a> {
+    vm: &'a VM,
+    iseq: &'a Iseq,
+    regs: Vec<Value>,
+    pc: usize,
+    call: Option<Pin<Box<VmFuture<'a>>>>,
+}
 
-                match inst.op {
-                    OpCode::Move => {
-                        regs[a] = regs[inst.b as usize].clone();
-                    }
-                    OpCode::LoadI => {
-                        regs[a] = Value::Integer(inst.b as i64);
-                    }
-                    OpCode::Add => {
-                        let v = regs[a].as_integer() + regs[a + 1].as_integer();
-                        regs[a] = Value::Integer(v);
-                    }
-                    OpCode::AddI => {
-                        let v = regs[a].as_integer() + inst.b as i64;
-                        regs[a] = Value::Integer(v);
-                    }
-                    OpCode::Sub => {
-                        let v = regs[a].as_integer() - regs[a + 1].as_integer();
-                        regs[a] = Value::Integer(v);
-                    }
-                    OpCode::SubI => {
-                        let v = regs[a].as_integer() - inst.b as i64;
-                        regs[a] = Value::Integer(v);
-                    }
-                    OpCode::Le => {
-                        let v = regs[a].as_integer() <= regs[a + 1].as_integer();
-                        regs[a] = Value::Bool(v);
-                    }
-                    OpCode::Jmp => {
-                        pc = a;
-                        continue;
-                    }
-                    OpCode::JmpNot => {
-                        if regs[a].is_falsy() {
-                            pc = inst.b as usize;
-                            continue;
-                        }
-                    }
-                    OpCode::SSend => {
-                        let sym = &iseq.symbols[inst.b as usize];
-                        let target = self
-                            .iseqs
-                            .iter()
-                            .find(|s| s.name == *sym)
-                            .unwrap_or_else(|| panic!("function not found: {}", sym));
-                        let c = inst.c as usize;
-                        let call_args: Vec<Value> =
-                            (a..=a + c).map(|i| regs[i].clone()).collect();
-                        let result = self.execute(target, call_args).await;
-                        regs[a] = result;
-                    }
-                    OpCode::Return => {
-                        return regs[a].clone();
-                    }
+impl<'a> VmFuture<'a> {
+    fn new(vm: &'a VM, iseq: &'a Iseq, args: Vec<Value>) -> Self {
+        let mut regs = vec![Value::Nil; iseq.max_regs + 1]; // 1-based indexing
+        for (i, arg) in args.into_iter().enumerate() {
+            regs[i + 1] = arg; // arguments start at R[1]
+        }
+        Self {
+            vm,
+            iseq,
+            regs,
+            pc: 0,
+            call: None,
+        }
+    }
+}
+
+impl<'a> Future for VmFuture<'a> {
+    type Output = Value;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Value> {
+        let this = self.get_mut();
+
+        // If a sub-call (SSEND) is in progress, poll it first
+        if let Some(ref mut call) = this.call {
+            match call.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    let a = this.iseq.instructions[this.pc].a as usize;
+                    this.regs[a] = result;
+                    this.call = None;
+                    this.pc += 1;
+                    return Poll::Pending;
                 }
-                pc += 1;
+                Poll::Pending => return Poll::Pending,
             }
         }
-        .boxed()
+
+        let inst = this.iseq.instructions[this.pc];
+        let a = inst.a as usize;
+
+        match inst.op {
+            OpCode::Move => {
+                this.regs[a] = this.regs[inst.b as usize].clone();
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::LoadI => {
+                this.regs[a] = Value::Integer(inst.b as i64);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::Add => {
+                let v = this.regs[a].as_integer() + this.regs[a + 1].as_integer();
+                this.regs[a] = Value::Integer(v);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::AddI => {
+                let v = this.regs[a].as_integer() + inst.b as i64;
+                this.regs[a] = Value::Integer(v);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::Sub => {
+                let v = this.regs[a].as_integer() - this.regs[a + 1].as_integer();
+                this.regs[a] = Value::Integer(v);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::SubI => {
+                let v = this.regs[a].as_integer() - inst.b as i64;
+                this.regs[a] = Value::Integer(v);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::Le => {
+                let v = this.regs[a].as_integer() <= this.regs[a + 1].as_integer();
+                this.regs[a] = Value::Bool(v);
+                this.pc += 1;
+                Poll::Pending
+            }
+            OpCode::Jmp => {
+                this.pc = a;
+                Poll::Pending
+            }
+            OpCode::JmpNot => {
+                if this.regs[a].is_falsy() {
+                    this.pc = inst.b as usize;
+                } else {
+                    this.pc += 1;
+                }
+                Poll::Pending
+            }
+            OpCode::SSend => {
+                let vm = this.vm;
+                let sym = &this.iseq.symbols[inst.b as usize];
+                let target = vm
+                    .iseqs
+                    .iter()
+                    .find(|s| s.name == *sym)
+                    .unwrap_or_else(|| panic!("function not found: {}", sym));
+                let c = inst.c as usize;
+                let call_args: Vec<Value> =
+                    (a..=a + c).map(|i| this.regs[i].clone()).collect();
+                this.call = Some(Box::pin(VmFuture::new(vm, target, call_args)));
+                Poll::Pending
+            }
+            OpCode::Return => Poll::Ready(this.regs[a].clone()),
+        }
     }
 }
 
@@ -173,7 +225,9 @@ impl Executor {
         loop {
             match future.as_mut().poll(&mut cx) {
                 Poll::Ready(output) => return output,
-                Poll::Pending => continue,
+                Poll::Pending => {
+                    continue;
+                },
             }
         }
     }
